@@ -1,16 +1,17 @@
-// Client-side slide renderer. Each slide becomes a 1080×1920 PNG drawn on a
-// canvas — text over a gradient. No image-generation API, no cost, deterministic
+// Client-side slide renderer. Each slide becomes a PNG drawn on a canvas — text
+// over a gradient or image. No image-generation API, no cost, deterministic
 // output. The resulting data URLs are sent to the server, which uploads them to
 // post-bridge as the post's media.
 //
-// Caption geometry (font %, stroke, line-height, padding, centering) comes from
-// lib/captionStyle.ts — the SAME constants the editor preview uses — so the
-// scheduled PNG matches what the user saw when editing.
-import type { Slide, Slideshow } from '../types';
-import { FONT_SIZE_PCT, STROKE_RATIO, LINE_HEIGHT, SIDE_PAD_PCT, pct } from './captionStyle';
-
-const W = 1080;
-const H = 1920;
+// Caption geometry + styling (font, weight, size, colour, stroke, text box) come
+// from the slide's own TextStyle via lib/slideStyle.ts — the SAME values the
+// editor preview uses — so the scheduled PNG matches what the user saw.
+import type { Slide, Slideshow, SlideRatio } from '../types';
+import {
+  RATIOS, ratioOf, textStyleOf, LINE_HEIGHT, SIDE_PAD_PCT,
+  BOX_PAD_X, BOX_PAD_Y, BOX_RADIUS, boxFill,
+} from './slideStyle';
+import { fontFamily, ensureFontReady } from './fonts';
 
 // Word-wrap within hard newlines, mirroring the preview's wrapping.
 function wrap(ctx: CanvasRenderingContext2D, text: string, maxWidth: number): string[] {
@@ -43,16 +44,31 @@ function loadImage(src: string): Promise<HTMLImageElement> {
 }
 
 // Draw an image to cover the whole canvas (object-fit: cover).
-function drawCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement) {
+function drawCover(ctx: CanvasRenderingContext2D, img: HTMLImageElement, W: number, H: number) {
   const scale = Math.max(W / img.width, H / img.height);
   const w = img.width * scale;
   const h = img.height * scale;
   ctx.drawImage(img, (W - w) / 2, (H - h) / 2, w, h);
 }
 
-export async function renderSlide(slide: Slide): Promise<string> {
-  // Make sure the web font is ready, otherwise the first render uses a fallback.
-  if (document.fonts?.ready) await document.fonts.ready;
+function roundRect(ctx: CanvasRenderingContext2D, x: number, y: number, w: number, h: number, r: number) {
+  const rad = Math.min(r, w / 2, h / 2);
+  ctx.beginPath();
+  ctx.moveTo(x + rad, y);
+  ctx.arcTo(x + w, y, x + w, y + h, rad);
+  ctx.arcTo(x + w, y + h, x, y + h, rad);
+  ctx.arcTo(x, y + h, x, y, rad);
+  ctx.arcTo(x, y, x + w, y, rad);
+  ctx.closePath();
+}
+
+export async function renderSlide(slide: Slide, ratio: SlideRatio): Promise<string> {
+  const { w: W, h: H } = RATIOS[ratio];
+  const style = textStyleOf(slide);
+
+  // Make sure the exact caption font+weight is ready, else the first bake falls
+  // back to a system font.
+  await ensureFontReady(style.font, style.weight, style.sizePx);
 
   const canvas = document.createElement('canvas');
   canvas.width = W;
@@ -63,8 +79,8 @@ export async function renderSlide(slide: Slide): Promise<string> {
     // Image background (same-origin: bundled at /library/… or scraped via /api/…).
     try {
       const img = await loadImage(slide.imageUrl);
-      drawCover(ctx, img);
-      // Darken so white text stays readable.
+      drawCover(ctx, img, W, H);
+      // Darken so light text stays readable.
       ctx.fillStyle = 'rgba(0,0,0,0.45)';
       ctx.fillRect(0, 0, W, H);
     } catch {
@@ -86,31 +102,44 @@ export async function renderSlide(slide: Slide): Promise<string> {
     ctx.fillRect(0, 0, W, H);
   }
 
-  // Caption: white bold text, black outline, centered — driven by the SAME
-  // percentages the editor preview uses, so the two always match.
-  const fontPx = Math.round(H * pct(FONT_SIZE_PCT));
+  // Caption — every dimension comes from the slide's TextStyle. Font size and
+  // stroke are already in export pixels (1080-wide basis), so no scaling.
+  const fontPx = style.sizePx;
   const lineHeight = Math.round(fontPx * LINE_HEIGHT);
-  const strokeW = Math.max(2, Math.round(fontPx * STROKE_RATIO));
+  const strokeW = Math.max(0, style.strokePx);
 
-  ctx.font = `800 ${fontPx}px Inter, sans-serif`;
+  ctx.font = `${style.weight} ${fontPx}px "${fontFamily(style.font)}", sans-serif`;
   ctx.textAlign = 'center';
   ctx.textBaseline = 'top';
   ctx.lineJoin = 'round';
   ctx.miterLimit = 2;
 
-  const maxWidth = W * (1 - 2 * pct(SIDE_PAD_PCT));
+  const maxWidth = W * (1 - 2 * (SIDE_PAD_PCT / 100));
   const lines = wrap(ctx, slide.text || '', maxWidth);
   const blockH = lines.length * lineHeight;
   const startY = (H - blockH) / 2; // vertically centered, matching the preview
   const x = W / 2;
 
+  // Text-box background behind the whole caption block.
+  const fill = boxFill(style);
+  if (fill && lines.length) {
+    const widest = Math.max(...lines.map((l) => ctx.measureText(l).width));
+    const padX = fontPx * BOX_PAD_X;
+    const padY = fontPx * BOX_PAD_Y;
+    roundRect(ctx, x - widest / 2 - padX, startY - padY, widest + padX * 2, blockH + padY * 2, fontPx * BOX_RADIUS);
+    ctx.fillStyle = fill;
+    ctx.fill();
+  }
+
   for (let i = 0; i < lines.length; i++) {
     const y = startY + i * lineHeight;
-    // Paint stroke first, fill on top — same effect as CSS paint-order: stroke fill.
-    ctx.strokeStyle = 'black';
-    ctx.lineWidth = strokeW;
-    ctx.strokeText(lines[i], x, y);
-    ctx.fillStyle = '#ffffff';
+    // Paint stroke first, fill on top — same as CSS paint-order: stroke fill.
+    if (strokeW > 0) {
+      ctx.strokeStyle = style.strokeColor;
+      ctx.lineWidth = strokeW;
+      ctx.strokeText(lines[i], x, y);
+    }
+    ctx.fillStyle = style.color;
     ctx.fillText(lines[i], x, y);
   }
 
@@ -118,9 +147,10 @@ export async function renderSlide(slide: Slide): Promise<string> {
 }
 
 export async function renderSlideshow(show: Slideshow): Promise<string[]> {
+  const ratio = ratioOf(show);
   const out: string[] = [];
   for (const slide of show.slides) {
-    out.push(await renderSlide(slide));
+    out.push(await renderSlide(slide, ratio));
   }
   return out;
 }

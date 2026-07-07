@@ -1,28 +1,26 @@
 // Image library: the bundled aesthetic packs (shipped in public/library/) plus
-// any images the user scrapes from Pinterest with their own Apify key. Scraped
-// images are downloaded to ~/.slidesmith/library/ so the browser can composite
-// them onto the export canvas same-origin (remote URLs would taint it).
-import { homedir } from 'node:os'
-import { join, dirname, extname } from 'node:path'
+// images the team uploads or scrapes from Pinterest. Uploaded/scraped files live
+// in the Supabase Storage `library` bucket; their index lives in the
+// `library_images` table. The browser fetches them same-origin through
+// /api/library/img/:id (server streams from Storage), so the export canvas stays
+// untainted.
+import { dirname, extname } from 'node:path'
 import { fileURLToPath } from 'node:url'
-import { mkdirSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync } from 'node:fs'
+import { readFileSync } from 'node:fs'
+import { join } from 'node:path'
+import { supabase, LIBRARY_BUCKET } from './supabase.js'
 import { logger } from './log.js'
 
 const log = logger('scrape')
 const __dirname = dirname(fileURLToPath(import.meta.url))
-const DIR = process.env.SLIDESMITH_DIR || join(homedir(), '.slidesmith')
-const MEDIA_DIR = join(DIR, 'library')
-const INDEX_PATH = join(DIR, 'library.json')
 const BUNDLED_MANIFEST = join(__dirname, '..', 'public', 'library', 'manifest.json')
 
-function ensure() {
-  if (!existsSync(MEDIA_DIR)) mkdirSync(MEDIA_DIR, { recursive: true })
-}
 function readJson(p, fb) {
   try { return JSON.parse(readFileSync(p, 'utf8')) } catch { return fb }
 }
 
-// Flatten the bundled manifest into image records the UI can render.
+// Flatten the bundled manifest into image records the UI can render. These ship
+// with the app (static assets), so they stay file-based and synchronous.
 function bundled() {
   const m = readJson(BUNDLED_MANIFEST, { packs: [] })
   return (m.packs || []).flatMap((pack) =>
@@ -35,54 +33,39 @@ function bundled() {
   )
 }
 
-// Names of the bundled aesthetic packs (used as the default selection for new projects).
+// Names of the bundled aesthetic packs (default selection for new projects).
 export function bundledPackNames() {
   const m = readJson(BUNDLED_MANIFEST, { packs: [] })
   return (m.packs || []).map((p) => p.name)
 }
 
-function scrapedIndex() {
-  return readJson(INDEX_PATH, [])
-}
+const CONTENT_TYPE = { '.jpg': 'image/jpeg', '.jpeg': 'image/jpeg', '.png': 'image/png', '.webp': 'image/webp' }
+const contentTypeFor = (path) => CONTENT_TYPE[extname(path).toLowerCase()] || 'application/octet-stream'
 
-// Recover image files on disk that aren't in the index (e.g. if the index was
-// emptied or drifted). Re-indexes them with stable ids matching the original
-// scheme so nothing is silently orphaned.
-function reconcileOrphans() {
-  const index = scrapedIndex()
-  if (!existsSync(MEDIA_DIR)) return index
-  const known = new Set(index.map((s) => s.file))
-  let changed = false
-  for (const file of readdirSync(MEDIA_DIR)) {
-    if (!/\.(jpe?g|png|webp)$/i.test(file) || known.has(file)) continue
-    index.push({ id: `scraped:${file.replace(/\.[^.]+$/, '')}`, file, pack: 'Scraped', addedAt: new Date().toISOString() })
-    changed = true
+// Map a stored row → the shape the UI expects (served via the proxy endpoint).
+function toRecord(row) {
+  return {
+    id: row.id,
+    url: `/api/library/img/${encodeURIComponent(row.id)}`,
+    pack: row.pack || 'Uploads',
+    source: row.source || 'scraped',
   }
-  if (changed) writeJson(INDEX_PATH, index)
-  return index
 }
 
-export function listLibrary() {
-  // Only list scraped images whose files actually exist on disk — avoids broken
-  // thumbnails / 404s if the index and files ever drift apart. Reconcile first
-  // so any orphaned files on disk are picked back up.
-  const scraped = reconcileOrphans()
-    .filter((s) => existsSync(join(MEDIA_DIR, s.file)))
-    .map((s) => ({
-      id: s.id,
-      url: `/api/library/img/${encodeURIComponent(s.id)}`,
-      pack: s.pack || 'Scraped',
-      source: 'scraped',
-    }))
-  // Scraped first (newest), then the bundled packs.
-  return [...scraped, ...bundled()]
+export async function listLibrary() {
+  const { data, error } = await supabase
+    .from('library_images')
+    .select('id, pack, source, added_at')
+    .order('added_at', { ascending: false })
+  if (error) throw new Error(`library list: ${error.message}`)
+  // Stored images first (newest), then the bundled packs.
+  return [...(data || []).map(toRecord), ...bundled()]
 }
 
-// Group the library into packs with a few cover thumbnails each (for the
-// pack-picker UIs in Generate + Settings).
-export function listPacks() {
+// Group the library into packs with a few cover thumbnails each.
+export async function listPacks() {
   const map = new Map()
-  for (const img of listLibrary()) {
+  for (const img of await listLibrary()) {
     if (!map.has(img.pack)) map.set(img.pack, { name: img.pack, source: img.source, count: 0, covers: [] })
     const p = map.get(img.pack)
     p.count++
@@ -91,38 +74,67 @@ export function listPacks() {
   return [...map.values()]
 }
 
-export function getScrapedFile(id) {
-  const rec = scrapedIndex().find((s) => s.id === id)
-  if (!rec) return null
-  const p = join(MEDIA_DIR, rec.file)
-  return existsSync(p) ? p : null
+// Fetch one stored image's bytes for the /api/library/img/:id proxy.
+export async function getImageBytes(id) {
+  const { data: row } = await supabase.from('library_images').select('path').eq('id', id).maybeSingle()
+  if (!row) return null
+  const { data, error } = await supabase.storage.from(LIBRARY_BUCKET).download(row.path)
+  if (error || !data) return null
+  const buffer = Buffer.from(await data.arrayBuffer())
+  return { buffer, contentType: contentTypeFor(row.path) }
 }
 
-export function removeScraped(id) {
-  const index = scrapedIndex()
-  const rec = index.find((s) => s.id === id)
-  // Delete the actual file too — otherwise reconcileOrphans() sees an
-  // un-indexed file on disk and immediately re-adds it ("zombie" delete).
-  if (rec) {
-    const p = join(MEDIA_DIR, rec.file)
-    if (existsSync(p)) rmSync(p)
+export async function removeScraped(id) {
+  const { data: row } = await supabase.from('library_images').select('path').eq('id', id).maybeSingle()
+  if (row) {
+    await supabase.storage.from(LIBRARY_BUCKET).remove([row.path])
+    await supabase.from('library_images').delete().eq('id', id)
   }
-  writeJson(INDEX_PATH, index.filter((s) => s.id !== id))
   return listLibrary()
 }
-function writeJson(p, v) {
-  ensure()
-  writeFileSync(p, JSON.stringify(v, null, 2))
+
+// Write one image to Storage + index it. Returns the UI record.
+async function storeImage(buffer, ext, pack) {
+  const id = `scraped:${Date.now()}-${Math.round(Math.random() * 1e6)}`
+  const path = `${id.replace('scraped:', '')}${ext}`
+  const up = await supabase.storage.from(LIBRARY_BUCKET).upload(path, buffer, {
+    contentType: contentTypeFor(path),
+    upsert: false,
+  })
+  if (up.error) throw new Error(`storage upload: ${up.error.message}`)
+  const ins = await supabase.from('library_images').insert({ id, path, pack, source: 'scraped' })
+  if (ins.error) {
+    await supabase.storage.from(LIBRARY_BUCKET).remove([path]) // don't orphan the file
+    throw new Error(`library index: ${ins.error.message}`)
+  }
+  return toRecord({ id, pack, source: 'scraped' })
 }
 
-// Pull image URLs out of whatever the Pinterest actor returns. Pinterest actors
-// vary in shape between versions, so we try the structured path first (best
-// quality) and fall back to scanning the whole response for pinimg.com assets,
-// preferring full-size originals over thumbnails.
+// Save images the user uploaded from their device. Body items: { mimeType, data }
+// where data is base64 (data-URL prefix ok). Grouped into an "Uploads" pack.
+const UPLOAD_PACK = 'Uploads'
+const EXT_BY_MIME = { 'image/jpeg': '.jpg', 'image/png': '.png', 'image/webp': '.webp' }
+
+export async function addUploadedImages(files) {
+  const added = []
+  for (const f of files || []) {
+    const ext = EXT_BY_MIME[String(f?.mimeType || '').toLowerCase()]
+    if (!ext) continue // accept only known image types
+    const b64 = String(f.data || '').replace(/^data:[^;]+;base64,/, '')
+    const buffer = Buffer.from(b64, 'base64')
+    if (buffer.length < 1024) continue // skip empty/placeholder
+    added.push(await storeImage(buffer, ext, UPLOAD_PACK))
+  }
+  log.ok(`Uploaded ${added.length} image${added.length === 1 ? '' : 's'} to "${UPLOAD_PACK}"`)
+  return added
+}
+
+// ── Pinterest scraping via Apify ──────────────────────────────────────────────
+// Pull image URLs out of whatever the Pinterest actor returns. Actors vary in
+// shape, so try the structured path first, then scan for pinimg.com assets.
 function pinImageUrls(items) {
   const list = Array.isArray(items) ? items : []
 
-  // 1) Structured: media.images.{original|large|...}
   const structured = new Set()
   for (const item of list) {
     if (item && typeof item === 'object') {
@@ -134,14 +146,12 @@ function pinImageUrls(items) {
   }
   if (structured.size) return [...structured]
 
-  // 2) Fallback: scan the whole blob for pinimg URLs. Prefer /originals/.
   const blob = JSON.stringify(list)
   const matches = blob.match(/https?:\\?\/\\?\/[^"'\\\s]*pinimg\.com[^"'\\\s]*/gi) || []
   const cleaned = matches
     .map((u) => u.replace(/\\\//g, '/').replace(/&amp;/g, '&'))
     .filter((u) => /\.(jpe?g|png|webp)/i.test(u))
   const originals = cleaned.filter((u) => /\/originals\//i.test(u))
-  // De-dupe by the trailing filename so we don't keep both a thumb and original.
   const byName = new Map()
   for (const u of [...originals, ...cleaned]) {
     const name = u.split('/').pop()
@@ -165,8 +175,6 @@ export async function scrapePinterest({ apiKey, actor, searches, count }) {
   if (!queries.length) throw new Error('Enter at least one Pinterest search.')
 
   const actorPath = (actor || 'fatihtahta/pinterest-scraper-search').replace('/', '~')
-  // This actor expects `{ queries, limit }` (NOT `searches`/`resultsLimit`), and
-  // its minimum limit is 10 — anything lower returns 0 items.
   const limit = Math.min(Math.max(Number(count) || 40, 10), 200)
   const input = { queries, limit }
   const pack = queries.join(', ')
@@ -194,8 +202,6 @@ export async function scrapePinterest({ apiKey, actor, searches, count }) {
   }
   log.ok(`found ${urls.length} image${urls.length === 1 ? '' : 's'} — downloading…`)
 
-  ensure()
-  const index = scrapedIndex()
   let added = 0
   let skipped = 0
   for (const url of urls) {
@@ -205,17 +211,13 @@ export async function scrapePinterest({ apiKey, actor, searches, count }) {
       const buf = Buffer.from(await r.arrayBuffer())
       if (buf.length < 1024) { skipped++; continue } // skip tiny/placeholder
       const ext = (extname(new URL(url).pathname) || '.jpg').slice(0, 5)
-      const id = `scraped:${Date.now()}-${Math.round(Math.random() * 1e6)}`
-      const file = `${id.replace('scraped:', '')}${ext}`
-      writeFileSync(join(MEDIA_DIR, file), buf)
-      index.unshift({ id, file, pack, addedAt: new Date().toISOString() })
+      await storeImage(buf, ext, pack)
       added++
       if (added % 5 === 0 || added === urls.length) log.progress(added, urls.length, 'downloaded')
     } catch {
       skipped++ // skip individual failures
     }
   }
-  writeJson(INDEX_PATH, index)
   log.ok(`Added ${added} image${added === 1 ? '' : 's'} to "${pack}"${skipped ? ` (${skipped} skipped)` : ''}`)
   return { added, found: urls.length }
 }

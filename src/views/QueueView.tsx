@@ -1,4 +1,4 @@
-import { Check, X, Sparkles, RefreshCw, Loader2, Pencil } from 'lucide-react';
+import { Check, X, Sparkles, RefreshCw, Loader2, Pencil, Download, Trash2 } from 'lucide-react';
 import type { Slideshow } from '../types';
 import { ViewHeader } from '../components/ViewHeader';
 import { SlidePreview } from '../components/SlidePreview';
@@ -13,7 +13,10 @@ interface QueueViewProps {
   onGenerate: () => void;
   onApprove: (id: string) => void;
   onReject: (id: string) => void;
+  onBulkReject: () => void;
   onEdit: (id: string) => void;
+  onDownload: (id: string) => void;
+  downloadingId: string | null;
   onToggleSelect: (id: string) => void;
   onSelectAll: () => void;
   onClearSelection: () => void;
@@ -28,7 +31,10 @@ export function QueueView({
   onGenerate,
   onApprove,
   onReject,
+  onBulkReject,
   onEdit,
+  onDownload,
+  downloadingId,
   onToggleSelect,
   onSelectAll,
   onClearSelection,
@@ -47,6 +53,9 @@ export function QueueView({
                 <span className="text-[12px] text-ink-5">{selectedCount} selected</span>
                 <Button variant="primary" icon={<Check size={13} />} onClick={onBulkSchedule}>
                   Schedule {selectedCount}
+                </Button>
+                <Button variant="secondary" icon={<Trash2 size={13} />} onClick={onBulkReject}>
+                  Delete {selectedCount}
                 </Button>
                 <Button variant="ghost" onClick={onClearSelection}>Clear</Button>
               </>
@@ -107,6 +116,8 @@ export function QueueView({
                 onApprove={() => onApprove(s.id)}
                 onReject={() => onReject(s.id)}
                 onEdit={() => onEdit(s.id)}
+                onDownload={() => onDownload(s.id)}
+                downloading={downloadingId === s.id}
               />
             ))}
           </div>
@@ -123,9 +134,11 @@ interface CardProps {
   onApprove: () => void;
   onReject: () => void;
   onEdit: () => void;
+  onDownload: () => void;
+  downloading: boolean;
 }
 
-function SlideshowCard({ slideshow, selected, onToggleSelect, onApprove, onReject, onEdit }: CardProps) {
+function SlideshowCard({ slideshow, selected, onToggleSelect, onApprove, onReject, onEdit, onDownload, downloading }: CardProps) {
   return (
     <div className={`bg-card border rounded-xl overflow-hidden animate-fadeIn transition-colors ${selected ? 'border-ink ring-1 ring-ink' : 'border-line'}`}>
       {/* Slide strip */}
@@ -135,7 +148,7 @@ function SlideshowCard({ slideshow, selected, onToggleSelect, onApprove, onRejec
         </label>
         <div className="grid grid-cols-6 gap-1.5">
           {slideshow.slides.map((slide) => (
-            <SlidePreview key={slide.id} slide={slide} />
+            <SlidePreview key={slide.id} slide={slide} ratio={slideshow.ratio} />
           ))}
         </div>
       </div>
@@ -168,6 +181,14 @@ function SlideshowCard({ slideshow, selected, onToggleSelect, onApprove, onRejec
         <div className="flex items-center gap-2 mt-4 pt-3 border-t border-line">
           <Button variant="secondary" icon={<Pencil size={13} />} onClick={onEdit}>
             Edit
+          </Button>
+          <Button
+            variant="secondary"
+            icon={downloading ? <Loader2 size={13} className="animate-spin" /> : <Download size={13} />}
+            onClick={onDownload}
+            disabled={downloading}
+          >
+            {downloading ? 'Preparing…' : 'Download'}
           </Button>
           <Button
             variant="primary"

@@ -1,31 +1,48 @@
-import { useEffect, useMemo, useState } from 'react';
-import { X, Loader2, ChevronLeft, ChevronRight, Trash2, Shuffle, Image as ImageIcon } from 'lucide-react';
-import type { Slideshow, Slide, LibraryImage } from '../types';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import { X, Loader2, ChevronLeft, ChevronRight, Trash2, Shuffle, Upload, Image as ImageIcon, Type } from 'lucide-react';
+import type { Slideshow, Slide, LibraryImage, SlideRatio, TextStyle } from '../types';
 import { Button } from './Button';
 import { SlidePreview } from './SlidePreview';
-import { getLibrary } from '../lib/api';
+import { getLibrary, uploadLibraryImages } from '../lib/api';
+import { textStyleOf, RATIOS, DEFAULT_RATIO } from '../lib/slideStyle';
+import { FONTS, fontDef, nearestWeight, loadFont } from '../lib/fonts';
 
 interface SlideshowEditorModalProps {
   slideshow: Slideshow;
   onClose: () => void;
-  onSave: (patch: { slides: Slide[]; caption: string; hashtags: string[] }) => Promise<void>;
+  onSave: (patch: { slides: Slide[]; caption: string; hashtags: string[]; ratio: SlideRatio }) => Promise<void>;
 }
 
 type Tab = 'post' | 'slide';
+
+const WEIGHT_LABELS: Record<number, string> = {
+  300: 'Light', 400: 'Regular', 500: 'Medium', 600: 'Semibold', 700: 'Bold', 800: 'Extrabold', 900: 'Black',
+};
 
 export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEditorModalProps) {
   const [slides, setSlides] = useState<Slide[]>(slideshow.slides.map((s) => ({ ...s })));
   const [caption, setCaption] = useState(slideshow.caption);
   const [hashtags, setHashtags] = useState(slideshow.hashtags.join(' '));
+  const [ratio, setRatio] = useState<SlideRatio>(slideshow.ratio || DEFAULT_RATIO);
   const [index, setIndex] = useState(0);
   const [tab, setTab] = useState<Tab>('post');
   const [library, setLibrary] = useState<LibraryImage[] | null>(null);
   const [pack, setPack] = useState('all');
   const [saving, setSaving] = useState(false);
+  const [uploading, setUploading] = useState(false);
+  const [applyAll, setApplyAll] = useState(false);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     getLibrary().then(setLibrary).catch(() => setLibrary([]));
   }, []);
+
+  const total = slides.length;
+  const current = slides[index];
+  const style = textStyleOf(current);
+
+  // Make sure the current slide's caption font is fetched so the preview shows it.
+  useEffect(() => { loadFont(style.font); }, [style.font]);
 
   const packs = useMemo(
     () => ['all', ...Array.from(new Set((library || []).map((i) => i.pack)))],
@@ -36,11 +53,64 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
     [library, pack]
   );
 
-  const total = slides.length;
-  const current = slides[index];
-
   const patchSlide = (patch: Partial<Slide>) =>
     setSlides((prev) => prev.map((s, i) => (i === index ? { ...s, ...patch } : s)));
+
+  // Apply a caption-style change to the current slide — or every slide when
+  // "Apply to all" is on. Merges onto each slide's fully-resolved style.
+  const patchStyle = (patch: Partial<TextStyle>) =>
+    setSlides((prev) =>
+      prev.map((s, i) =>
+        applyAll || i === index ? { ...s, style: { ...textStyleOf(s), ...patch } } : s
+      )
+    );
+
+  const toggleApplyAll = () => {
+    const next = !applyAll;
+    setApplyAll(next);
+    // Turning it on syncs every slide to the current slide's style.
+    if (next) {
+      const cur = textStyleOf(slides[index]);
+      setSlides((prev) => prev.map((s) => ({ ...s, style: { ...cur } })));
+    }
+  };
+
+  const setFont = (font: string) => {
+    loadFont(font);
+    patchStyle({ font, weight: nearestWeight(font, style.weight) });
+  };
+
+  // Upload images from the user's device: read each as a data URL, save them to
+  // the library (persisted server-side), then show them and apply the first to
+  // this slide.
+  const handleUpload = async (fileList: FileList | null) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setUploading(true);
+    try {
+      const encoded = await Promise.all(
+        files.map(
+          (f) =>
+            new Promise<{ mimeType: string; data: string }>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve({ mimeType: f.type, data: String(reader.result) });
+              reader.onerror = () => reject(reader.error);
+              reader.readAsDataURL(f);
+            })
+        )
+      );
+      const added = await uploadLibraryImages(encoded);
+      if (added.length) {
+        setLibrary((prev) => [...added, ...(prev || [])]);
+        setPack(added[0].pack);
+        patchSlide({ imageUrl: added[0].url });
+      }
+    } catch (e) {
+      alert(e instanceof Error ? e.message : 'Upload failed');
+    } finally {
+      setUploading(false);
+    }
+  };
 
   const shuffleBackgrounds = () => {
     const pool = filtered;
@@ -61,11 +131,15 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
         slides,
         caption,
         hashtags: hashtags.split(/[\s,]+/).map((t) => t.replace(/^#/, '')).filter(Boolean),
+        ratio,
       });
     } finally {
       setSaving(false);
     }
   };
+
+  const weights = fontDef(style.font).weights;
+  const weightIdx = Math.max(0, weights.indexOf(style.weight));
 
   return (
     <div className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4" onClick={onClose}>
@@ -76,7 +150,7 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
         {/* Preview */}
         <div className="sm:flex-1 bg-surface flex flex-col items-center justify-center p-6 gap-3 min-w-0">
           <div className="w-[200px] max-w-full">
-            <SlidePreview slide={current} />
+            <SlidePreview slide={current} ratio={ratio} />
           </div>
           <div className="flex items-center gap-3">
             <button
@@ -131,8 +205,7 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
           <div className="flex-1 overflow-y-auto p-4 space-y-5">
             {tab === 'post' ? (
               <>
-                <div>
-                  <label className="text-[11px] text-ink-6 uppercase tracking-widest font-semibold mb-1.5 block">Caption</label>
+                <Field label="Caption">
                   <textarea
                     value={caption}
                     onChange={(e) => setCaption(e.target.value)}
@@ -140,9 +213,8 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
                     className="w-full bg-card border border-line rounded-lg px-3 py-2 text-[13px] text-ink resize-none outline-none focus:border-ink-7 focus:ring-2 focus:ring-ink/10"
                   />
                   <span className="text-[10px] text-ink-6">{caption.length} chars</span>
-                </div>
-                <div>
-                  <label className="text-[11px] text-ink-6 uppercase tracking-widest font-semibold mb-1.5 block">Hashtags</label>
+                </Field>
+                <Field label="Hashtags">
                   <input
                     value={hashtags}
                     onChange={(e) => setHashtags(e.target.value)}
@@ -150,7 +222,19 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
                     className="w-full h-9 bg-card border border-line rounded-lg px-3 text-[13px] text-ink outline-none focus:border-ink-7 focus:ring-2 focus:ring-ink/10"
                   />
                   <span className="text-[10px] text-ink-6">Space or comma separated, no # needed.</span>
-                </div>
+                </Field>
+                <Field label="Slide ratio">
+                  <select
+                    value={ratio}
+                    onChange={(e) => setRatio(e.target.value as SlideRatio)}
+                    className="w-full h-9 bg-card border border-line rounded-lg px-2 text-[13px] text-ink outline-none focus:border-ink-7"
+                  >
+                    {(Object.keys(RATIOS) as SlideRatio[]).map((r) => (
+                      <option key={r} value={r}>{RATIOS[r].label}</option>
+                    ))}
+                  </select>
+                  <span className="text-[10px] text-ink-6">Applies to every slide in this slideshow.</span>
+                </Field>
               </>
             ) : (
               <>
@@ -171,20 +255,92 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
                   />
                 </div>
 
-                <div>
+                {/* ── Text styling ─────────────────────────────────────────── */}
+                <div className="space-y-4 border-t border-line pt-4">
+                  <div className="flex items-center justify-between">
+                    <div className="flex items-center gap-1.5 text-[12px] font-semibold text-ink">
+                      <Type size={13} /> Text
+                    </div>
+                    <label className="flex items-center gap-1.5 text-[11px] text-ink-5 cursor-pointer select-none">
+                      <input type="checkbox" checked={applyAll} onChange={toggleApplyAll} className="cursor-pointer" />
+                      Apply to all slides
+                    </label>
+                  </div>
+
+                  <Field label="Font">
+                    <select
+                      value={style.font}
+                      onChange={(e) => setFont(e.target.value)}
+                      className="w-full h-9 bg-card border border-line rounded-lg px-2 text-[13px] text-ink outline-none focus:border-ink-7"
+                    >
+                      {FONTS.map((f) => (
+                        <option key={f.key} value={f.key}>{f.label}</option>
+                      ))}
+                    </select>
+                  </Field>
+
+                  <Field label={`Weight: ${WEIGHT_LABELS[style.weight] || style.weight}`}>
+                    <input
+                      type="range"
+                      min={0}
+                      max={weights.length - 1}
+                      step={1}
+                      value={weightIdx}
+                      disabled={weights.length <= 1}
+                      onChange={(e) => patchStyle({ weight: weights[Number(e.target.value)] })}
+                      className="w-full accent-ink disabled:opacity-40"
+                    />
+                  </Field>
+
+                  <Field label={`Size: ${style.sizePx}px`}>
+                    <input
+                      type="range" min={24} max={160} step={2} value={style.sizePx}
+                      onChange={(e) => patchStyle({ sizePx: Number(e.target.value) })}
+                      className="w-full accent-ink"
+                    />
+                  </Field>
+
+                  <Field label="Text colour">
+                    <ColorField value={style.color} onChange={(color) => patchStyle({ color })} />
+                  </Field>
+
+                  <Field label={`Stroke: ${style.strokePx}px`}>
+                    <input
+                      type="range" min={0} max={24} step={1} value={style.strokePx}
+                      onChange={(e) => patchStyle({ strokePx: Number(e.target.value) })}
+                      className="w-full accent-ink"
+                    />
+                  </Field>
+
+                  <Field label="Stroke colour">
+                    <ColorField value={style.strokeColor} onChange={(strokeColor) => patchStyle({ strokeColor })} />
+                  </Field>
+
+                  <Field label="Text background">
+                    <div className="flex items-center gap-1.5 mb-2">
+                      <Segmented active={style.bg === 'solid'} onClick={() => patchStyle({ bg: 'solid', bgColor: style.bg === 'solid' ? style.bgColor : '#ffffff' })}>White</Segmented>
+                      <Segmented active={style.bg === 'none'} onClick={() => patchStyle({ bg: 'none' })}>None</Segmented>
+                      <Segmented active={style.bg === 'snapchat'} onClick={() => patchStyle({ bg: 'snapchat' })}>Snapchat</Segmented>
+                    </div>
+                    {style.bg === 'solid' && (
+                      <ColorField value={style.bgColor} onChange={(bgColor) => patchStyle({ bgColor })} />
+                    )}
+                  </Field>
+                </div>
+
+                {/* ── Background image ─────────────────────────────────────── */}
+                <div className="border-t border-line pt-4">
                   <div className="flex items-center justify-between mb-1.5">
                     <label className="text-[11px] text-ink-6 uppercase tracking-widest font-semibold">Background</label>
-                    <div className="flex items-center gap-2">
-                      <select
-                        value={pack}
-                        onChange={(e) => setPack(e.target.value)}
-                        className="h-7 bg-card border border-line rounded-md px-1.5 text-[11px] text-ink outline-none"
-                      >
-                        {packs.map((p) => (
-                          <option key={p} value={p}>{p === 'all' ? 'All packs' : p}</option>
-                        ))}
-                      </select>
-                    </div>
+                    <select
+                      value={pack}
+                      onChange={(e) => setPack(e.target.value)}
+                      className="h-7 bg-card border border-line rounded-md px-1.5 text-[11px] text-ink outline-none"
+                    >
+                      {packs.map((p) => (
+                        <option key={p} value={p}>{p === 'all' ? 'All packs' : p}</option>
+                      ))}
+                    </select>
                   </div>
                   <div className="flex items-center gap-2 mb-2">
                     <Button variant="ghost" size="sm" icon={<ImageIcon size={12} />} onClick={() => patchSlide({ imageUrl: undefined })}>
@@ -193,6 +349,26 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
                     <Button variant="ghost" size="sm" icon={<Shuffle size={12} />} onClick={shuffleBackgrounds}>
                       Shuffle all
                     </Button>
+                    <Button
+                      variant="ghost"
+                      size="sm"
+                      icon={uploading ? <Loader2 size={12} className="animate-spin" /> : <Upload size={12} />}
+                      onClick={() => fileInput.current?.click()}
+                      disabled={uploading}
+                    >
+                      {uploading ? 'Uploading…' : 'Upload'}
+                    </Button>
+                    <input
+                      ref={fileInput}
+                      type="file"
+                      accept="image/png,image/jpeg,image/webp"
+                      multiple
+                      hidden
+                      onChange={(e) => {
+                        handleUpload(e.target.files);
+                        e.target.value = '';
+                      }}
+                    />
                   </div>
                   {library === null ? (
                     <div className="flex items-center justify-center py-6 text-ink-5 text-[12px] gap-2">
@@ -232,5 +408,46 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
         </div>
       </div>
     </div>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <div>
+      <label className="text-[11px] text-ink-6 uppercase tracking-widest font-semibold mb-1.5 block">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function ColorField({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <div className="flex items-center gap-2">
+      <input
+        type="color"
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        className="w-9 h-9 shrink-0 rounded-md border border-line bg-card p-0.5 cursor-pointer"
+      />
+      <input
+        value={value}
+        onChange={(e) => onChange(e.target.value)}
+        spellCheck={false}
+        className="flex-1 h-9 bg-card border border-line rounded-lg px-3 text-[12px] font-mono uppercase text-ink outline-none focus:border-ink-7"
+      />
+    </div>
+  );
+}
+
+function Segmented({ active, onClick, children }: { active: boolean; onClick: () => void; children: ReactNode }) {
+  return (
+    <button
+      onClick={onClick}
+      className={`flex-1 h-8 rounded-md text-[12px] font-medium border transition-colors ${
+        active ? 'bg-ink text-card border-ink' : 'bg-card text-ink-4 border-line hover:text-ink'
+      }`}
+    >
+      {children}
+    </button>
   );
 }

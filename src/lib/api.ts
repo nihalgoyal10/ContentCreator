@@ -1,6 +1,7 @@
 // Frontend API client. All calls go to the local Slidesmith server (proxied at
 // /api in dev, same-origin in production). The server holds the keys and talks
 // to Claude + post-bridge — the browser never sees the secrets in a request.
+import { getIdToken } from './firebase';
 import type {
   AppConfig,
   Project,
@@ -14,10 +15,16 @@ import type {
 } from '../types';
 
 async function req<T>(path: string, init?: RequestInit): Promise<T> {
+  // Attach the Firebase ID token so the (auth-gated) API accepts the request.
+  const token = await getIdToken();
   const res = await fetch(`/api${path}`, {
-    headers: { 'content-type': 'application/json' },
     cache: 'no-store', // always hit the server — never a stale Schedule/Results list
     ...init,
+    headers: {
+      'content-type': 'application/json',
+      ...(token ? { Authorization: `Bearer ${token}` } : {}),
+      ...(init?.headers || {}),
+    },
   });
   const body = await res.json().catch(() => ({}));
   if (!res.ok) throw new Error((body as { error?: string }).error || res.statusText);
@@ -63,7 +70,7 @@ export const removeFromQueue = (id: string) =>
 
 export const updateSlideshow = (
   id: string,
-  patch: Partial<Pick<Slideshow, 'slides' | 'caption' | 'hashtags' | 'hook'>>
+  patch: Partial<Pick<Slideshow, 'slides' | 'caption' | 'hashtags' | 'hook' | 'ratio'>>
 ) => req<Slideshow[]>(`/queue/${id}`, { method: 'PUT', body: JSON.stringify(patch) });
 
 // ── Image library ─────────────────────────────────────────────────────────────
@@ -79,6 +86,13 @@ export const scrapePinterest = (searches: string[], count: number) =>
 
 export const deleteLibraryImage = (id: string) =>
   req<LibraryImage[]>(`/library/${encodeURIComponent(id)}`, { method: 'DELETE' });
+
+// Save images picked from the user's device. `files` carry base64 (data-URL) data.
+export const uploadLibraryImages = (files: { mimeType: string; data: string }[]) =>
+  req<LibraryImage[]>('/library/upload', {
+    method: 'POST',
+    body: JSON.stringify({ files }),
+  });
 
 export const getAccounts = () => req<SocialAccount[]>('/accounts');
 

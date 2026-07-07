@@ -130,7 +130,7 @@ export function ScheduleModal({ slideshow, accounts, defaults, onClose, onConfir
           <div>
             <div className="grid grid-cols-6 gap-1.5">
               {slideshow.slides.map((s) => (
-                <SlidePreview key={s.id} slide={s} />
+                <SlidePreview key={s.id} slide={s} ratio={slideshow.ratio} />
               ))}
             </div>
             <p className="text-[12px] text-ink-4 mt-2 line-clamp-2">{slideshow.caption}</p>

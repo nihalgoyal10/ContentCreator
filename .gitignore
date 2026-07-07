@@ -17,6 +17,7 @@ dist-ssr
 .env.*
 !.env.example
 .slidesmith/
+.vercel
 
 # Editor directories and files
 .vscode/*

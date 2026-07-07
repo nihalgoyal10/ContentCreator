@@ -1,5 +1,22 @@
 export type ViewKey = 'queue' | 'library' | 'schedule' | 'results' | 'brain' | 'settings';
 
+// Aspect ratio of the exported slides (all slides in a show share one).
+export type SlideRatio = '9:16' | '4:5' | '1:1';
+
+// Per-slide caption styling. All sizes are expressed in pixels of the exported
+// image (which is a fixed 1080px wide, so they stay stable across ratios). Both
+// the on-screen preview and the baked PNG read these — see lib/slideStyle.ts.
+export interface TextStyle {
+  font: string;        // font key from lib/fonts.ts (e.g. 'tiktok-sans')
+  weight: number;      // 300–900
+  sizePx: number;      // caption font size, px in the 1080-wide export
+  color: string;       // text fill, hex
+  strokePx: number;    // outline width, px (0 = no outline)
+  strokeColor: string; // outline colour, hex
+  bg: 'none' | 'solid' | 'snapchat'; // text background box
+  bgColor: string;     // box colour when bg === 'solid'
+}
+
 export interface Slide {
   id: string;
   text: string;
@@ -8,6 +25,8 @@ export interface Slide {
   imageUrl?: string;
   bgFrom?: string;
   bgTo?: string;
+  // Caption styling override. Partial so older slides fall back to defaults.
+  style?: Partial<TextStyle>;
 }
 
 export interface Slideshow {
@@ -18,6 +37,7 @@ export interface Slideshow {
   slides: Slide[];
   createdAt: string;
   rationale: string;
+  ratio?: SlideRatio; // defaults to 9:16 when absent
 }
 
 export interface BrainState {

@@ -1,0 +1,9 @@
+{
+  "$schema": "https://openapi.vercel.sh/vercel.json",
+  "buildCommand": "npm run build",
+  "outputDirectory": "dist",
+  "rewrites": [
+    { "source": "/api/(.*)", "destination": "/api" },
+    { "source": "/__/auth/(.*)", "destination": "https://orbit-ai-471708.firebaseapp.com/__/auth/$1" }
+  ]
+}

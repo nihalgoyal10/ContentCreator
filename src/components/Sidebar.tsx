@@ -1,6 +1,8 @@
 import { useState } from 'react';
-import { LayoutGrid, CalendarClock, LineChart, Brain, Settings, ChevronsUpDown, Plus, Check, Images } from 'lucide-react';
+import { LayoutGrid, CalendarClock, LineChart, Brain, Settings, ChevronsUpDown, Plus, Check, Images, LogOut } from 'lucide-react';
 import type { ViewKey, Project } from '../types';
+import { useAuth } from '../hooks/useAuth';
+import { logOut } from '../lib/firebase';
 
 interface SidebarProps {
   activeView: ViewKey;
@@ -37,6 +39,7 @@ export function Sidebar({
 }: SidebarProps) {
   const [menuOpen, setMenuOpen] = useState(false);
   const active = projects.find((p) => p.id === activeProjectId) ?? projects[0];
+  const { user } = useAuth();
 
   return (
     <aside className="w-[220px] shrink-0 flex flex-col bg-bg border-r border-line h-full">
@@ -140,6 +143,29 @@ export function Sidebar({
           <Settings size={14} className="shrink-0" />
           <span className="text-[13px]">Settings</span>
         </button>
+
+        {/* Signed-in account + sign out */}
+        {user && (
+          <div className="mt-1 flex items-center gap-2 px-2 h-9">
+            {user.photoURL ? (
+              <img src={user.photoURL} alt="" className="w-5 h-5 rounded-full shrink-0" />
+            ) : (
+              <div className="w-5 h-5 rounded-full bg-ink text-bg flex items-center justify-center text-[10px] font-bold shrink-0">
+                {initials(user.displayName || user.email || 'U')}
+              </div>
+            )}
+            <span className="text-[12px] text-ink-5 truncate flex-1" title={user.email || undefined}>
+              {user.email}
+            </span>
+            <button
+              onClick={() => logOut()}
+              aria-label="Sign out"
+              className="text-ink-6 hover:text-ink shrink-0 transition-colors"
+            >
+              <LogOut size={14} />
+            </button>
+          </div>
+        )}
       </div>
     </aside>
   );

@@ -4,16 +4,22 @@
   "version": "0.0.0",
   "type": "module",
   "license": "SEE LICENSE IN LICENSE",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "concurrently -k -n web,api -c cyan,magenta \"vite\" \"npm run server\"",
-    "server": "node --watch server/index.js",
+    "server": "node --env-file=.env --watch server/index.js",
     "build": "tsc -b && vite build",
-    "start": "node server/index.js",
+    "start": "node --env-file=.env server/index.js",
     "lint": "eslint .",
     "preview": "vite preview"
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.110.0",
     "express": "^5.1.0",
+    "firebase": "^12.15.0",
+    "jose": "^6.2.3",
     "lucide-react": "^1.8.0",
     "react": "^19.2.4",
     "react-dom": "^19.2.4"

@@ -11,8 +11,9 @@ import { ResultsView } from './views/ResultsView';
 import { BrainView } from './views/BrainView';
 import { SettingsView } from './views/SettingsView';
 import { renderSlideshow } from './lib/render';
+import { makeZip, dataUrlToBytes, downloadBlob } from './lib/zip';
 import * as api from './lib/api';
-import type { AppConfig, Project, Slideshow, Slide, SocialAccount, BrainState, ViewKey } from './types';
+import type { AppConfig, Project, Slideshow, Slide, SlideRatio, SocialAccount, BrainState, ViewKey } from './types';
 
 export default function App() {
   const [config, setConfig] = useState<AppConfig | null>(null);
@@ -25,6 +26,7 @@ export default function App() {
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [generateOpen, setGenerateOpen] = useState(false);
+  const [downloadingId, setDownloadingId] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
 
   const hasOpenrouter = !!config?.keys.openrouter;
@@ -74,6 +76,40 @@ export default function App() {
     setQueue(await api.removeFromQueue(id));
   };
 
+  // Delete every currently-selected slideshow, then clear the selection.
+  const bulkReject = async () => {
+    if (!selectedIds.length) return;
+    if (!window.confirm(`Delete ${selectedIds.length} slideshow${selectedIds.length === 1 ? '' : 's'}? This can't be undone.`)) return;
+    let next = queue;
+    for (const id of selectedIds) next = await api.removeFromQueue(id);
+    setQueue(next);
+    setSelectedIds([]);
+  };
+
+  // Render the slideshow's slides to PNGs and download them as a single ZIP,
+  // alongside a caption.txt so it's ready to post manually. Same render path
+  // used for scheduling, so the download matches exactly what gets posted.
+  const download = async (id: string) => {
+    const show = queue.find((s) => s.id === id);
+    if (!show) return;
+    setDownloadingId(id);
+    try {
+      const dataUrls = await renderSlideshow(show);
+      const entries = dataUrls.map((url, i) => ({
+        name: `slide-${String(i + 1).padStart(2, '0')}.png`,
+        data: dataUrlToBytes(url),
+      }));
+      const caption = `${show.caption}${show.hashtags.length ? '\n\n' + show.hashtags.map((t) => `#${t}`).join(' ') : ''}`;
+      entries.push({ name: 'caption.txt', data: new TextEncoder().encode(caption) });
+      const base = show.hook.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, '').slice(0, 40) || show.id;
+      downloadBlob(makeZip(entries), `${base}.zip`);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Could not render the slideshow for download.');
+    } finally {
+      setDownloadingId(null);
+    }
+  };
+
   // Keep the multi-select in sync as queue items come and go.
   useEffect(() => {
     setSelectedIds((prev) => prev.filter((id) => queue.some((s) => s.id === id)));
@@ -89,7 +125,7 @@ export default function App() {
     setActiveView('schedule');
   };
 
-  const saveEdits = async (patch: { slides: Slide[]; caption: string; hashtags: string[] }) => {
+  const saveEdits = async (patch: { slides: Slide[]; caption: string; hashtags: string[]; ratio: SlideRatio }) => {
     if (!editing) return;
     setQueue(await api.updateSlideshow(editing.id, patch));
     setEditing(null);
@@ -203,7 +239,10 @@ export default function App() {
             selectedIds={selectedIds}
             onApprove={(id) => setScheduling(queue.find((s) => s.id === id) || null)}
             onReject={reject}
+            onBulkReject={bulkReject}
             onEdit={(id) => setEditing(queue.find((s) => s.id === id) || null)}
+            onDownload={download}
+            downloadingId={downloadingId}
             onToggleSelect={toggleSelect}
             onSelectAll={() => setSelectedIds(queue.map((s) => s.id))}
             onClearSelection={() => setSelectedIds([])}

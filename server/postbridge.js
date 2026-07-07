@@ -60,9 +60,16 @@ async function pb(token, path, init = {}) {
   }
 }
 
+// TikTok posting is disabled — filter TikTok accounts out here, the single
+// source every account picker (Schedule, Bulk, Settings) and the schedule
+// guard reads from, so TikTok can never be selected or posted to.
+export function isDisabledPlatform(platform) {
+  return String(platform || '').toLowerCase() === 'tiktok'
+}
+
 export async function listAccounts(token) {
   const body = await pb(token, '/v1/social-accounts?limit=100')
-  return body?.data || []
+  return (body?.data || []).filter((a) => !isDisabledPlatform(a?.platform))
 }
 
 // Build a { media_id → url } map for the given posts in ONE call. post-bridge's

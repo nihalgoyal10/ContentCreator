@@ -1,9 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
-import { Loader2, Download, Trash2 } from 'lucide-react';
+import { useEffect, useMemo, useRef, useState } from 'react';
+import { Loader2, Download, Trash2, Upload } from 'lucide-react';
 import type { LibraryImage } from '../types';
 import { ViewHeader } from '../components/ViewHeader';
 import { Button } from '../components/Button';
-import { getLibrary, scrapePinterest, deleteLibraryImage } from '../lib/api';
+import { getLibrary, scrapePinterest, deleteLibraryImage, uploadLibraryImages } from '../lib/api';
 
 interface LibraryViewProps {
   hasApify: boolean;
@@ -14,8 +14,10 @@ export function LibraryView({ hasApify }: LibraryViewProps) {
   const [searches, setSearches] = useState('');
   const [count, setCount] = useState(40);
   const [scraping, setScraping] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [note, setNote] = useState<string | null>(null);
+  const fileInput = useRef<HTMLInputElement>(null);
 
   const load = () => getLibrary().then(setImages).catch((e) => setError(e.message));
   useEffect(() => { load(); }, []);
@@ -37,6 +39,36 @@ export function LibraryView({ hasApify }: LibraryViewProps) {
     }
   };
 
+  // Upload images from the user's device — no Apify key needed. Saved into the
+  // "Uploads" pack (shown below), reusable as slide backgrounds.
+  const upload = async (fileList: FileList | null) => {
+    const files = Array.from(fileList || []);
+    if (!files.length) return;
+    setError(null);
+    setNote(null);
+    setUploading(true);
+    try {
+      const encoded = await Promise.all(
+        files.map(
+          (f) =>
+            new Promise<{ mimeType: string; data: string }>((resolve, reject) => {
+              const reader = new FileReader();
+              reader.onload = () => resolve({ mimeType: f.type, data: String(reader.result) });
+              reader.onerror = () => reject(reader.error);
+              reader.readAsDataURL(f);
+            })
+        )
+      );
+      const added = await uploadLibraryImages(encoded);
+      setNote(`Uploaded ${added.length} image${added.length === 1 ? '' : 's'}.`);
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setUploading(false);
+    }
+  };
+
   const remove = async (id: string) => setImages(await deleteLibraryImage(id));
 
   // Group by pack, scraped packs first.
@@ -53,7 +85,7 @@ export function LibraryView({ hasApify }: LibraryViewProps) {
     <>
       <ViewHeader
         title="Library"
-        subtitle="Background images for your slides. Ships with curated aesthetic packs — scrape more from Pinterest with your own Apify key."
+        subtitle="Background images for your slides. Ships with curated aesthetic packs — upload your own, or scrape more from Pinterest with your own Apify key."
       />
 
       <div className="flex-1 overflow-y-auto">
@@ -94,6 +126,26 @@ export function LibraryView({ hasApify }: LibraryViewProps) {
               >
                 {scraping ? 'Scraping…' : 'Scrape Pinterest'}
               </Button>
+              <Button
+                variant="secondary"
+                size="lg"
+                icon={uploading ? <Loader2 size={13} className="animate-spin" /> : <Upload size={13} />}
+                onClick={() => fileInput.current?.click()}
+                disabled={uploading}
+              >
+                {uploading ? 'Uploading…' : 'Upload'}
+              </Button>
+              <input
+                ref={fileInput}
+                type="file"
+                accept="image/png,image/jpeg,image/webp"
+                multiple
+                hidden
+                onChange={(e) => {
+                  upload(e.target.files);
+                  e.target.value = '';
+                }}
+              />
             </div>
             {!hasApify && (
               <p className="text-[12px] text-ink-5 mt-2">

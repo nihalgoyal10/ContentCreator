@@ -1,18 +1,12 @@
-// Local, file-based persistence. Slidesmith is a single-user tool, so all state
-// lives in a small JSON config file + a queue file under the user's home dir.
-// No database — post-bridge holds the scheduled posts and results.
+// Shared-workspace persistence, backed by Supabase. The whole team shares one
+// config + one queue, stored as JSONB singletons in the `app_kv` table (keys
+// 'config' and 'queue') — mirroring the old config.json / queue.json files.
 //
-// A "project" is one brand/account you generate for. Only the Brain and the
-// default post-bridge accounts differ per project; the API keys and model are
-// global. The queue (generated-but-unscheduled drafts) is per project.
-import { homedir } from 'node:os'
-import { join } from 'node:path'
-import { mkdirSync, readFileSync, writeFileSync, existsSync } from 'node:fs'
+// Everything here is async (Supabase is a network call). A "project" is one
+// brand/account you generate for; only the Brain + default post-bridge accounts
+// differ per project. API keys and model are global.
+import { supabase } from './supabase.js'
 import { bundledPackNames } from './library.js'
-
-const DIR = process.env.SLIDESMITH_DIR || join(homedir(), '.slidesmith')
-const CONFIG_PATH = join(DIR, 'config.json')
-const QUEUE_PATH = join(DIR, 'queue.json')
 
 const DEFAULT_BRAIN = {
   niche: '',
@@ -23,20 +17,6 @@ const DEFAULT_BRAIN = {
 }
 const DEFAULT_DEFAULTS = { socialAccountIds: [], mode: 'draft' }
 
-function ensureDir() {
-  if (!existsSync(DIR)) mkdirSync(DIR, { recursive: true })
-}
-function readJson(path, fallback) {
-  try {
-    return JSON.parse(readFileSync(path, 'utf8'))
-  } catch {
-    return fallback
-  }
-}
-function writeJson(path, value) {
-  ensureDir()
-  writeFileSync(path, JSON.stringify(value, null, 2))
-}
 function newId(prefix) {
   return `${prefix}-${Date.now()}-${Math.round(Math.random() * 1e6)}`
 }
@@ -52,10 +32,24 @@ function makeProject(name, brain, defaults, imagePacks) {
   }
 }
 
+// ── app_kv singleton helpers ──────────────────────────────────────────────────
+async function kvGet(key, fallback) {
+  const { data, error } = await supabase.from('app_kv').select('value').eq('key', key).maybeSingle()
+  if (error) throw new Error(`supabase read "${key}": ${error.message}`)
+  return data ? data.value : fallback
+}
+async function kvSet(key, value) {
+  const { error } = await supabase
+    .from('app_kv')
+    .upsert({ key, value, updated_at: new Date().toISOString() }, { onConflict: 'key' })
+  if (error) throw new Error(`supabase write "${key}": ${error.message}`)
+  return value
+}
+
 // Normalize on every read: fill defaults and migrate the old single-brain shape
 // ({ brain, defaults } at top level) into projects[].
-export function getConfig() {
-  const s = readJson(CONFIG_PATH, {})
+export async function getConfig() {
+  const s = (await kvGet('config', {})) || {}
   let projects = Array.isArray(s.projects) && s.projects.length
     ? s.projects.map((p) => ({
         id: p.id || newId('p'),
@@ -68,8 +62,7 @@ export function getConfig() {
 
   if (!projects) {
     // Migrate a pre-projects config, or create the first project.
-    const p = makeProject(s.brain?.appName || 'Project 1', s.brain, s.defaults)
-    projects = [p]
+    projects = [makeProject(s.brain?.appName || 'Project 1', s.brain, s.defaults)]
   }
 
   const activeProjectId = projects.some((p) => p.id === s.activeProjectId)
@@ -84,27 +77,26 @@ export function getConfig() {
     activeProjectId,
   }
 
-  // If we had to synthesize/migrate projects (no valid persisted projects array,
-  // or the active id was stale), write it back once so project ids are stable
-  // across subsequent reads. Otherwise every read would mint fresh ids.
+  // If we synthesized/migrated projects, persist once so ids stay stable across
+  // reads (otherwise every read would mint fresh ids).
   const needsPersist =
     !Array.isArray(s.projects) ||
     s.projects.length !== projects.length ||
     s.activeProjectId !== activeProjectId ||
     s.projects.some((p, i) => p.id !== projects[i].id)
-  if (needsPersist) writeJson(CONFIG_PATH, cfg)
+  if (needsPersist) await kvSet('config', cfg)
 
   return cfg
 }
 
-function writeConfig(cfg) {
-  writeJson(CONFIG_PATH, cfg)
+async function writeConfig(cfg) {
+  await kvSet('config', cfg)
   return cfg
 }
 
 // Global settings only (keys + model). Project data is edited via the project ops.
-export function saveGlobal(patch) {
-  const c = getConfig()
+export async function saveGlobal(patch) {
+  const c = await getConfig()
   return writeConfig({
     ...c,
     model: patch.model ?? c.model,
@@ -113,18 +105,20 @@ export function saveGlobal(patch) {
   })
 }
 
-export function getActiveProject(c = getConfig()) {
-  return c.projects.find((p) => p.id === c.activeProjectId) || c.projects[0]
+// Pass a preloaded config to avoid a second fetch, or omit to load one.
+export async function getActiveProject(c) {
+  const cfg = c || (await getConfig())
+  return cfg.projects.find((p) => p.id === cfg.activeProjectId) || cfg.projects[0]
 }
 
-export function createProject(name) {
-  const c = getConfig()
+export async function createProject(name) {
+  const c = await getConfig()
   const project = makeProject(name || `Project ${c.projects.length + 1}`)
   return writeConfig({ ...c, projects: [...c.projects, project], activeProjectId: project.id })
 }
 
-export function updateProject(id, patch) {
-  const c = getConfig()
+export async function updateProject(id, patch) {
+  const c = await getConfig()
   const projects = c.projects.map((p) =>
     p.id === id
       ? {
@@ -139,49 +133,47 @@ export function updateProject(id, patch) {
   return writeConfig({ ...c, projects })
 }
 
-export function deleteProject(id) {
-  const c = getConfig()
+export async function deleteProject(id) {
+  const c = await getConfig()
   let projects = c.projects.filter((p) => p.id !== id)
   if (!projects.length) projects = [makeProject('Project 1')]
   const activeProjectId = c.activeProjectId === id ? projects[0].id : c.activeProjectId
-  removeQueueFor(id)
+  await removeQueueFor(id)
   return writeConfig({ ...c, projects, activeProjectId })
 }
 
-export function setActiveProject(id) {
-  const c = getConfig()
+export async function setActiveProject(id) {
+  const c = await getConfig()
   if (!c.projects.some((p) => p.id === id)) throw new Error('Unknown project')
   return writeConfig({ ...c, activeProjectId: id })
 }
 
-// ── Queue (per project) ───────────────────────────────────────────────────────
-function readQueueMap() {
-  const m = readJson(QUEUE_PATH, {})
+// ── Queue (per project, stored as one { projectId: Slideshow[] } map) ─────────
+async function readQueueMap() {
+  const m = await kvGet('queue', {})
   return m && !Array.isArray(m) ? m : {}
 }
-function writeQueueMap(m) {
-  writeJson(QUEUE_PATH, m)
+async function writeQueueMap(m) {
+  await kvSet('queue', m)
   return m
 }
-export function getQueue(projectId) {
-  return readQueueMap()[projectId] || []
+export async function getQueue(projectId) {
+  return (await readQueueMap())[projectId] || []
 }
-export function setQueue(projectId, items) {
-  const m = readQueueMap()
+export async function setQueue(projectId, items) {
+  const m = await readQueueMap()
   m[projectId] = items
-  writeQueueMap(m)
+  await writeQueueMap(m)
   return items
 }
-export function addToQueue(projectId, items) {
-  return setQueue(projectId, [...items, ...getQueue(projectId)])
+export async function addToQueue(projectId, items) {
+  return setQueue(projectId, [...items, ...(await getQueue(projectId))])
 }
-export function removeFromQueue(projectId, id) {
-  return setQueue(projectId, getQueue(projectId).filter((s) => s.id !== id))
+export async function removeFromQueue(projectId, id) {
+  return setQueue(projectId, (await getQueue(projectId)).filter((s) => s.id !== id))
 }
-function removeQueueFor(projectId) {
-  const m = readQueueMap()
+async function removeQueueFor(projectId) {
+  const m = await readQueueMap()
   delete m[projectId]
-  writeQueueMap(m)
+  await writeQueueMap(m)
 }
-
-export const CONFIG_DIR = DIR
