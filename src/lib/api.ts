@@ -94,6 +94,34 @@ export const uploadLibraryImages = (files: { mimeType: string; data: string }[])
     body: JSON.stringify({ files }),
   });
 
+function readAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result));
+    r.onerror = () => reject(r.error);
+    r.readAsDataURL(file);
+  });
+}
+
+// Upload image Files ONE request at a time. Vercel caps a single request body at
+// ~4.5 MB, so batching several photos into one POST 413s (multi-upload "fails").
+// Per-file keeps each request small. Returns everything that uploaded; throws
+// only if every file failed (so partial success still surfaces).
+export async function uploadImageFiles(files: File[]): Promise<LibraryImage[]> {
+  const out: LibraryImage[] = [];
+  let lastErr: unknown;
+  for (const file of files) {
+    try {
+      const data = await readAsDataUrl(file);
+      out.push(...(await uploadLibraryImages([{ mimeType: file.type, data }])));
+    } catch (e) {
+      lastErr = e;
+    }
+  }
+  if (!out.length && lastErr) throw lastErr;
+  return out;
+}
+
 export const getAccounts = () => req<SocialAccount[]>('/accounts');
 
 export interface SchedulePayload {

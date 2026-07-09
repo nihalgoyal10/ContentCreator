@@ -3,7 +3,7 @@ import { X, Loader2, ChevronLeft, ChevronRight, Trash2, Shuffle, Upload, Image a
 import type { Slideshow, Slide, LibraryImage, SlideRatio, TextStyle } from '../types';
 import { Button } from './Button';
 import { SlidePreview } from './SlidePreview';
-import { getLibrary, uploadLibraryImages } from '../lib/api';
+import { getLibrary, uploadImageFiles } from '../lib/api';
 import { textStyleOf, RATIOS, DEFAULT_RATIO } from '../lib/slideStyle';
 import { FONTS, fontDef, nearestWeight, loadFont } from '../lib/fonts';
 
@@ -88,22 +88,14 @@ export function SlideshowEditorModal({ slideshow, onClose, onSave }: SlideshowEd
     if (!files.length) return;
     setUploading(true);
     try {
-      const encoded = await Promise.all(
-        files.map(
-          (f) =>
-            new Promise<{ mimeType: string; data: string }>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve({ mimeType: f.type, data: String(reader.result) });
-              reader.onerror = () => reject(reader.error);
-              reader.readAsDataURL(f);
-            })
-        )
-      );
-      const added = await uploadLibraryImages(encoded);
+      const added = await uploadImageFiles(files);
       if (added.length) {
         setLibrary((prev) => [...added, ...(prev || [])]);
         setPack(added[0].pack);
         patchSlide({ imageUrl: added[0].url });
+      }
+      if (added.length < files.length) {
+        alert(`Uploaded ${added.length} of ${files.length}. Some photos were too large (over ~4.5 MB each) — try smaller images.`);
       }
     } catch (e) {
       alert(e instanceof Error ? e.message : 'Upload failed');

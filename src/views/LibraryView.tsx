@@ -3,7 +3,7 @@ import { Loader2, Download, Trash2, Upload } from 'lucide-react';
 import type { LibraryImage } from '../types';
 import { ViewHeader } from '../components/ViewHeader';
 import { Button } from '../components/Button';
-import { getLibrary, scrapePinterest, deleteLibraryImage, uploadLibraryImages } from '../lib/api';
+import { getLibrary, scrapePinterest, deleteLibraryImage, uploadImageFiles } from '../lib/api';
 
 interface LibraryViewProps {
   hasApify: boolean;
@@ -48,19 +48,12 @@ export function LibraryView({ hasApify }: LibraryViewProps) {
     setNote(null);
     setUploading(true);
     try {
-      const encoded = await Promise.all(
-        files.map(
-          (f) =>
-            new Promise<{ mimeType: string; data: string }>((resolve, reject) => {
-              const reader = new FileReader();
-              reader.onload = () => resolve({ mimeType: f.type, data: String(reader.result) });
-              reader.onerror = () => reject(reader.error);
-              reader.readAsDataURL(f);
-            })
-        )
+      const added = await uploadImageFiles(files);
+      setNote(
+        added.length < files.length
+          ? `Uploaded ${added.length} of ${files.length} — some photos were over ~4.5 MB. Try smaller images.`
+          : `Uploaded ${added.length} image${added.length === 1 ? '' : 's'}.`
       );
-      const added = await uploadLibraryImages(encoded);
-      setNote(`Uploaded ${added.length} image${added.length === 1 ? '' : 's'}.`);
       await load();
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
