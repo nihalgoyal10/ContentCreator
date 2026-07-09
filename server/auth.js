@@ -5,10 +5,21 @@
 import { createRemoteJWKSet, jwtVerify } from 'jose'
 
 const PROJECT = process.env.FIREBASE_PROJECT_ID || ''
-const ALLOWED = (process.env.ALLOWED_EMAILS || '')
+
+// Source-of-truth allowlist (emails aren't secret). ALLOWED_EMAILS env can
+// override, but only when it resolves to a non-empty list — so a missing/blank
+// env var never silently disables the gate (which would let any Google account in).
+const FALLBACK_ALLOWED = [
+  'founders@superwavelabs.com',
+  'nihal@talktorox.com',
+  'shivay@talktorox.com',
+  'nihalgoyal10@gmail.com',
+]
+const fromEnv = (process.env.ALLOWED_EMAILS || '')
   .split(',')
   .map((e) => e.trim().toLowerCase())
   .filter(Boolean)
+const ALLOWED = fromEnv.length ? fromEnv : FALLBACK_ALLOWED
 
 // Google's public keys for Firebase ID tokens (jose caches + refreshes these).
 const JWKS = createRemoteJWKSet(
@@ -28,7 +39,7 @@ export async function requireAuth(req, res, next) {
 
     const email = String(payload.email || '').toLowerCase()
     if (payload.email_verified === false) return res.status(403).json({ error: 'Email not verified' })
-    if (ALLOWED.length && !ALLOWED.includes(email)) {
+    if (!ALLOWED.includes(email)) {
       return res.status(403).json({ error: 'Access denied: not an authorized user' })
     }
 
